@@ -1,2 +1,4 @@
 "# hackathon-ai-business-analysis" 
-\n Запуск через "streamlit run app.py"
+
+#Пусть временно будет так
+Запуск через "streamlit run app.py"
