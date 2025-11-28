@@ -55,6 +55,7 @@ High-level flow:
    - **publish** it to Confluence via `/api/v1/publish`.
 
 ---
+![Architecture Overview](ai-business-analysis.png)
 
 ## Tech Stack
 
