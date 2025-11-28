@@ -107,39 +107,54 @@ export function ChatInterface() {
 
         const userMsg = { id: Date.now(), role: "user", content: input }
         setMessages(prev => [...prev, userMsg])
-        const currentInput = input;
+
+        const currentInput = input
         setInput("")
-
-        // Сброс документа при первом сообщении
-        if (messages.length === 0) resetDocument();
-
         setIsLoading(true)
         setGenerating(true)
 
         try {
-            // 1. Попытка реального запроса
-            // Для локального теста с Integration Engineer URL может быть http://localhost:8000/chat
-            const res = await fetch('/api/chat', {
+            // 1. Стучимся на Бэкенд (порт 8000)
+            const res = await fetch('http://127.0.0.1:8000/api/v1/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_id: "session_1", message: currentInput })
+                body: JSON.stringify({
+                    session_id: "session_" + Date.now(),
+                    message: currentInput
+                })
             });
 
-            if (!res.ok) throw new Error("Backend unavailable");
-            const data: ChatResponse = await res.json();
-            handleSuccessResponse(data);
+            if (!res.ok) throw new Error("Backend error");
+
+            const data = await res.json();
+
+            // 2. Если пришли требования (документ) - обновляем LiveDocument
+            if (data.requirements) {
+                // Тут вызываем маппер
+                console.log("Получены требования:", data.requirements);
+
+                setArtifacts({
+                    docTitle: data.requirements.project_name,
+                    sections: mapBackendDocToSections(data.requirements),
+                    diagramCode: data.requirements.diagram_mermaid
+                })
+            }
+
+            // 3. Показываем ответ бота
+            setMessages(prev => [...prev, {
+                id: Date.now() + 1,
+                role: "assistant",
+                content: data.assistant_message || "Ответ получен, но он пуст."
+            }])
 
         } catch (error) {
-            console.log("Backend недоступен, переходим на Mock Data для демо...");
-
-            // 2. ФОЛЛБЭК НА MOCK DATA (Демо режим)
-            setTimeout(() => {
-                handleSuccessResponse({
-                    assistant_message: `**Анализ завершен (Demo Mode).** \n\nАгент-критик подтверждает валидность запроса. Документ сформирован на основе шаблонов банка.\n\n*Примечание: Бэкенд не подключен, используются демонстрационные данные.*`,
-                    requirements: MOCK_REQUIREMENTS
-                })
-            }, 2000);
-
+            console.error(error);
+            // Если сервер выключен, мягко сообщаем об этом (или включаем демо-режим)
+            setMessages(prev => [...prev, {
+                id: Date.now() + 1,
+                role: "assistant",
+                content: "⚠️ **Не удалось соединиться с сервером.** Проверьте, запущен ли Python на порту 8000."
+            }])
         } finally {
             setIsLoading(false)
             setGenerating(false)
