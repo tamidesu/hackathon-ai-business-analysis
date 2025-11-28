@@ -62,9 +62,21 @@ function BotMessage({ content, isLatest }: { content: string, isLatest: boolean 
     )
 }
 
+type PublishResponse = {
+  confluence_url: string;
+  page_id: string;
+  status: string; // "created" | "updated"
+};
+
 export function ChatInterface() {
     const [input, setInput] = React.useState("")
     const [isLoading, setIsLoading] = React.useState(false)
+
+    const backendBaseUrl =
+    process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+
+    const [sessionId] = React.useState(() => "session_" + Date.now());
+    const [hasPublished, setHasPublished] = React.useState(false);
 
     const setGenerating = useUIStore((state) => state.setGenerating)
     const setArtifacts = useUIStore((state) => state.setArtifacts)
@@ -82,8 +94,8 @@ export function ChatInterface() {
     }
 
     // Функция для обработки успешного ответа (не важно, реального или мокового)
-    const handleSuccessResponse = (response: ChatResponse) => {
-        // Если пришли требования - обновляем документ
+    const handleSuccessResponse = async (response: ChatResponse) => {
+    // 1. Обновляем правую панель (LiveDocument), если пришли требования
         if (response.requirements) {
             const formattedSections = mapBackendDocToSections(response.requirements);
             setArtifacts({
@@ -93,73 +105,126 @@ export function ChatInterface() {
                 diagramCode: response.requirements.diagram_mermaid || ""
             });
         }
-        // Добавляем ответ бота
-        setMessages(prev => [...prev, {
-            id: Date.now() + 1,
-            role: "assistant",
-            content: response.assistant_message
-        }]);
-    }
+
+        // 2. Добавляем обычный ответ бота
+        setMessages(prev => [
+            ...prev,
+            {
+                id: Date.now() + 1,
+                role: "assistant",
+                content: response.assistant_message || "Ответ получен, но он пуст.",
+            },
+        ]);
+
+        // 3. Если документ готов — сразу публикуем
+        if (response.is_completed && response.requirements && !hasPublished) {
+            try {
+                const publishRes = await fetch(`${backendBaseUrl}/api/v1/publish`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        doc: response.requirements,
+                        parent_title: null, // если не используешь иерархию — можно не отправлять
+                    }),
+                });
+
+                if (!publishRes.ok) {
+                    console.error("Publish failed", publishRes.status);
+                    setMessages(prev => [
+                        ...prev,
+                        {
+                            id: Date.now() + 2,
+                            role: "assistant",
+                            content:
+                                "⚠️ Не удалось автоматически опубликовать документ в Confluence (ошибка сервера).",
+                        },
+                    ]);
+                    return;
+                }
+
+                const publishData: PublishResponse = await publishRes.json();
+
+                if (publishData.confluence_url) {
+                    setMessages(prev => [
+                        ...prev,
+                        {
+                            id: Date.now() + 3,
+                            role: "assistant",
+                            content: `Документ опубликован в Confluence:\n\n[Открыть документ](${publishData.confluence_url})`,
+                        },
+                    ]);
+                    setHasPublished(true);
+                } else {
+                    setMessages(prev => [
+                        ...prev,
+                        {
+                            id: Date.now() + 3,
+                            role: "assistant",
+                            content:
+                                "Документ опубликован, но сервер не вернул ссылку Confluence.",
+                        },
+                    ]);
+                }
+            } catch (e) {
+                console.error(e);
+                setMessages(prev => [
+                    ...prev,
+                    {
+                        id: Date.now() + 4,
+                        role: "assistant",
+                        content:
+                            "⚠️ Не удалось автоматически опубликовать документ в Confluence (network error).",
+                    },
+                ]);
+            }
+        }
+    };
 
     const handleSend = async (e: React.FormEvent) => {
-        e.preventDefault()
-        if (!input.trim()) return
+        e.preventDefault();
+        if (!input.trim()) return;
 
-        const userMsg = { id: Date.now(), role: "user", content: input }
-        setMessages(prev => [...prev, userMsg])
+        const userMsg = { id: Date.now(), role: "user", content: input };
+        setMessages(prev => [...prev, userMsg]);
 
-        const currentInput = input
-        setInput("")
-        setIsLoading(true)
-        setGenerating(true)
+        const currentInput = input;
+        setInput("");
+        setIsLoading(true);
+        setGenerating(true);
 
         try {
-            // 1. Стучимся на Бэкенд (порт 8000)
-            const res = await fetch('http://127.0.0.1:8000/api/v1/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+            const res = await fetch(`${backendBaseUrl}/api/v1/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    session_id: "session_" + Date.now(),
-                    message: currentInput
-                })
+                    session_id: sessionId,
+                    message: currentInput,
+                    // пока можно без history, если на бэке он опционален
+                }),
             });
 
             if (!res.ok) throw new Error("Backend error");
 
-            const data = await res.json();
+            const data: ChatResponse = await res.json();
 
-            // 2. Если пришли требования (документ) - обновляем LiveDocument
-            if (data.requirements) {
-                // Тут вызываем маппер
-                console.log("Получены требования:", data.requirements);
-
-                setArtifacts({
-                    docTitle: data.requirements.project_name,
-                    sections: mapBackendDocToSections(data.requirements),
-                    diagramCode: data.requirements.diagram_mermaid
-                })
-            }
-
-            // 3. Показываем ответ бота
-            setMessages(prev => [...prev, {
-                id: Date.now() + 1,
-                role: "assistant",
-                content: data.assistant_message || "Ответ получен, но он пуст."
-            }])
-
+            await handleSuccessResponse(data);
         } catch (error) {
             console.error(error);
-            // Если сервер выключен, мягко сообщаем об этом (или включаем демо-режим)
-            setMessages(prev => [...prev, {
-                id: Date.now() + 1,
-                role: "assistant",
-                content: "⚠️ **Не удалось соединиться с сервером.** Проверьте, запущен ли Python на порту 8000."
-            }])
+            setMessages(prev => [
+                ...prev,
+                {
+                    id: Date.now() + 1,
+                    role: "assistant",
+                    content:
+                        "⚠️ **Не удалось соединиться с сервером.** Проверьте, запущен ли backend на порту 8000.",
+                },
+            ]);
         } finally {
-            setIsLoading(false)
-            setGenerating(false)
+            setIsLoading(false);
+            setGenerating(false);
         }
-    }
+    };
 
     const starterCards = [
         { icon: CreditCard, title: "Процесс кредитования", desc: "Схема BPMN для выдачи займов", prompt: "Опиши процесс выдачи кредита" },
